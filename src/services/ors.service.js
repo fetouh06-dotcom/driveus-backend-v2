@@ -9,20 +9,21 @@ async function geocode(text) {
     throw err;
   }
 
-  const { data } = await axios.get("https://api.openrouteservice.org/geocode/search", {
+  const resp = await axios.get("https://api.openrouteservice.org/geocode/search", {
     params: { api_key: config.OPENROUTE_API_KEY, text },
     timeout: 20000,
     validateStatus: () => true
   });
 
-  if (data?.error || data?.message) {
-    console.error("ORS geocode error:", data);
-    const err = new Error(data?.error?.message || data?.message || "Erreur ORS geocode");
+  if (resp.status >= 400 || resp.data?.error || resp.data?.message) {
+    console.error("ORS geocode error:", resp.status, resp.data);
+    const msg = resp.data?.error?.message || resp.data?.message || "Erreur ORS geocode";
+    const err = new Error(msg);
     err.statusCode = 400;
     throw err;
   }
 
-  const feat = data?.features?.[0];
+  const feat = resp.data?.features?.[0];
   if (!feat) {
     const err = new Error("Adresse introuvable (ORS)");
     err.statusCode = 400;
@@ -31,6 +32,22 @@ async function geocode(text) {
 
   const [lon, lat] = feat.geometry.coordinates;
   return { lon, lat, label: feat.properties.label };
+}
+
+function extractDistanceMeters(data) {
+  // Format GeoJSON (souvent)
+  const geo = data?.features?.[0]?.properties?.summary?.distance;
+  if (typeof geo === "number") return geo;
+
+  // Format JSON (souvent)
+  const json = data?.routes?.[0]?.summary?.distance;
+  if (typeof json === "number") return json;
+
+  // Parfois routes[0].segments[0].distance (fallback)
+  const seg = data?.routes?.[0]?.segments?.[0]?.distance;
+  if (typeof seg === "number") return seg;
+
+  return null;
 }
 
 async function routeDistanceKm(pickupText, dropoffText) {
@@ -51,18 +68,18 @@ async function routeDistanceKm(pickupText, dropoffText) {
     }
   );
 
-  if (resp.status >= 400) {
-    console.error("ORS directions status:", resp.status);
-    console.error("ORS directions body:", resp.data);
+  // IMPORTANT: ORS peut renvoyer un payload d’erreur même si le status n’est pas >= 400
+  if (resp.status >= 400 || resp.data?.error || resp.data?.message) {
+    console.error("ORS directions error:", resp.status, resp.data);
     const msg = resp.data?.error?.message || resp.data?.message || "Erreur ORS directions";
     const err = new Error(msg);
     err.statusCode = 400;
     throw err;
   }
 
-  const meters = resp.data?.features?.[0]?.properties?.summary?.distance;
+  const meters = extractDistanceMeters(resp.data);
   if (!meters) {
-    console.error("ORS directions malformed:", resp.data);
+    console.error("ORS directions unknown format:", resp.data);
     const err = new Error("ORS: réponse invalide (distance manquante)");
     err.statusCode = 400;
     throw err;
