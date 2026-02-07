@@ -58,33 +58,39 @@ router.post(
         Date.now() + config.DEPOSIT_EXPIRES_MINUTES * 60 * 1000
       ).toISOString();
 
-      db.prepare(
+      await db.execute(
         `
         INSERT INTO bookings (
           id, user_id, pickup, dropoff, distance, price, created_at, pickup_datetime, status,
           customer_name, customer_phone, customer_email, notes,
           deposit_amount, deposit_paid, payment_status, deposit_due_at
-        ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'pending_payment', ?, ?, ?, ?, ?, 0, 'deposit_pending', ?)
-      `
-      ).run(
-        id,
-        pickupLabel,
-        dropoffLabel,
-        distanceKm,
-        price,
-        createdAt,
-        pickup_datetime || null,
-        customer_name || null,
-        customer_phone || null,
-        customer_email || null,
-        notes || null,
-        config.DEPOSIT_EUR,
-        dueAt
+        ) VALUES (
+          ?, NULL, ?, ?, ?, ?, ?, ?, 'pending_payment',
+          ?, ?, ?, ?,
+          ?, 0, 'deposit_pending', ?
+        )
+        `,
+        [
+          id,
+          pickupLabel,
+          dropoffLabel,
+          distanceKm,
+          price,
+          createdAt,
+          pickup_datetime || null,
+          customer_name || null,
+          customer_phone || null,
+          customer_email || null,
+          notes || null,
+          config.DEPOSIT_EUR,
+          dueAt
+        ]
       );
 
-      const booking = db.prepare("SELECT * FROM bookings WHERE id=?").get(id);
+      const r = await db.execute("SELECT * FROM bookings WHERE id = ?", [id]);
+      const booking = r.rows?.[0] || null;
 
-      if (securityEvent) {
+      if (securityEvent && booking) {
         securityEvent("public_booking_created", req, {
           booking_id: booking.id,
           email: booking.customer_email || null,
