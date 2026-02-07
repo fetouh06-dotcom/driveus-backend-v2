@@ -7,6 +7,7 @@ const { getConfig } = require("../config/env");
 
 const { loginLimiter } = require("../middleware/rateLimiters");
 const { validateLogin } = require("../middleware/validate");
+
 // Optionnel (si tu as installé le pack logs sécurité)
 let securityEvent = null;
 try {
@@ -16,48 +17,92 @@ try {
 const router = express.Router();
 const config = getConfig();
 
+/**
+ * POST /api/auth/register
+ */
 router.post("/register", async (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: "email et password requis" });
-
-  const id = uuidv4();
-  const hash = await bcrypt.hash(password, 10);
-
   try {
-    db.prepare("INSERT INTO users (id, email, password, role, created_at) VALUES (?, ?, ?, 'user', ?)")
-      .run(id, String(email).toLowerCase(), hash, new Date().toISOString());
-  } catch {
-    return res.status(400).json({ error: "Email déjà utilisé" });
-  }
+    const { email, password } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ error: "email et password requis" });
+    }
 
-  return res.json({ success: true, id });
+    const normalizedEmail = String(email).toLowerCase().trim();
+
+    // Vérifie si déjà utilisé
+    const check = await db.execute("SELECT id FROM users WHERE email = ?", [normalizedEmail]);
+    if (check.rows && check.rows.length) {
+      return res.status(400).json({ error: "Email déjà utilisé" });
+    }
+
+    const id = uuidv4();
+    const hash = await bcrypt.hash(password, 10);
+
+    await db.execute(
+      "INSERT INTO users (id, email, password, role, created_at) VALUES (?, ?, ?, 'user', ?)",
+      [id, normalizedEmail, hash, new Date().toISOString()]
+    );
+
+    return res.json({ success: true, id });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Erreur serveur" });
+  }
 });
 
-// ✅ anti-bruteforce + validation
+/**
+ * POST /api/auth/login
+ * ✅ anti-bruteforce + validation
+ */
 router.post("/login", loginLimiter, validateLogin, async (req, res) => {
-  const { email, password } = req.body || {};
+  try {
+    const { email, password } = req.body || {};
+    const normalizedEmail = String(email).toLowerCase().trim();
 
-  const user = db.prepare("SELECT * FROM users WHERE email=?").get(String(email).toLowerCase());
-  if (!user) {
-    if (securityEvent) securityEvent("auth_failed", req, { email: String(email).toLowerCase(), reason: "user_not_found" });
-    return res.status(401).json({ error: "Identifiants invalides" });
+    const r = await db.execute("SELECT * FROM users WHERE email = ?", [normalizedEmail]);
+    const user = r.rows?.[0] || null;
+
+    if (!user) {
+      if (securityEvent) {
+        securityEvent("auth_failed", req, {
+          email: normalizedEmail,
+          reason: "user_not_found"
+        });
+      }
+      return res.status(401).json({ error: "Identifiants invalides" });
+    }
+
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) {
+      if (securityEvent) {
+        securityEvent("auth_failed", req, {
+          email: user.email,
+          user_id: user.id,
+          reason: "bad_password"
+        });
+      }
+      return res.status(401).json({ error: "Identifiants invalides" });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      config.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    if (securityEvent) {
+      securityEvent("auth_success", req, {
+        email: user.email,
+        user_id: user.id,
+        role: user.role
+      });
+    }
+
+    return res.json({ token });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Erreur serveur" });
   }
-
-  const ok = await bcrypt.compare(password, user.password);
-  if (!ok) {
-    if (securityEvent) securityEvent("auth_failed", req, { email: user.email, user_id: user.id, reason: "bad_password" });
-    return res.status(401).json({ error: "Identifiants invalides" });
-  }
-
-  const token = jwt.sign(
-    { id: user.id, email: user.email, role: user.role },
-    config.JWT_SECRET,
-    { expiresIn: "7d" }
-  );
-
-  if (securityEvent) securityEvent("auth_success", req, { email: user.email, user_id: user.id, role: user.role });
-
-  return res.json({ token });
 });
 
 module.exports = router;
