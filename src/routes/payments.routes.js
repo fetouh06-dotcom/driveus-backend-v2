@@ -24,7 +24,9 @@ router.post(
     try {
       const { booking_id } = req.body || {};
 
-      const booking = db.prepare("SELECT * FROM bookings WHERE id=?").get(booking_id);
+      const r = await db.execute("SELECT * FROM bookings WHERE id = ?", [booking_id]);
+      const booking = r.rows?.[0] || null;
+
       if (!booking) return res.status(404).json({ error: "Réservation introuvable" });
       if (booking.deposit_paid) return res.status(400).json({ error: "Acompte déjà payé" });
       if (!config.FRONTEND_URL) return res.status(400).json({ error: "FRONTEND_URL manquant" });
@@ -53,9 +55,10 @@ router.post(
         cancel_url: `${config.FRONTEND_URL}/paiement/annule?booking_id=${booking_id}`
       });
 
-      db.prepare(
-        "UPDATE bookings SET stripe_session_id=?, payment_status='deposit_pending' WHERE id=?"
-      ).run(session.id, booking_id);
+      await db.execute(
+        "UPDATE bookings SET stripe_session_id = ?, payment_status = 'deposit_pending' WHERE id = ?",
+        [session.id, booking_id]
+      );
 
       if (securityEvent) {
         securityEvent("stripe_deposit_session_created", req, {
@@ -79,12 +82,12 @@ router.post(
   }
 );
 
-function stripeWebhookHandler(req, res) {
+async function stripeWebhookHandler(req, res) {
   let event;
+
   try {
     const stripe = getStripe();
     const sig = req.headers["stripe-signature"];
-
     if (!sig) return res.status(400).send("Webhook Error: signature manquante");
 
     event = stripe.webhooks.constructEvent(req.body, sig, getWebhookSecret());
@@ -98,27 +101,45 @@ function stripeWebhookHandler(req, res) {
       const bookingId = session.metadata?.booking_id;
 
       if (bookingId) {
-        // ✅ Sécurité: on vérifie que la session correspond à celle enregistrée (si existante)
-        const current = db.prepare("SELECT id, stripe_session_id FROM bookings WHERE id=?").get(bookingId);
+        // ✅ Sécurité: vérifier que la session Stripe correspond à celle enregistrée (si existante)
+        const currentRes = await db.execute(
+          "SELECT id, stripe_session_id FROM bookings WHERE id = ?",
+          [bookingId]
+        );
+        const current = currentRes.rows?.[0] || null;
 
         if (current && current.stripe_session_id && current.stripe_session_id !== session.id) {
-          // session mismatch => on ignore
+          // session mismatch => ignore
           return res.json({ received: true });
         }
 
-        db.prepare(`
+        await db.execute(
+          `
           UPDATE bookings
-          SET deposit_paid=1,
-              payment_status='deposit_paid',
-              status='confirmed',
+          SET deposit_paid = 1,
+              payment_status = 'deposit_paid',
+              status = 'confirmed',
               stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?)
-          WHERE id=?
-        `).run(session.payment_intent || null, bookingId);
+          WHERE id = ?
+          `,
+          [session.payment_intent || null, bookingId]
+        );
+
+        if (securityEvent) {
+          securityEvent("stripe_webhook_checkout_completed", req, {
+            booking_id: bookingId,
+            session_id: session.id,
+            payment_intent: session.payment_intent || null
+          });
+        }
       }
     }
 
     return res.json({ received: true });
   } catch (e) {
+    if (securityEvent) {
+      securityEvent("stripe_webhook_processing_error", req, { message: e.message });
+    }
     return res.status(500).send("Webhook processing error");
   }
 }
