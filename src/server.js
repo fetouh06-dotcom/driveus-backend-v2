@@ -65,7 +65,7 @@ function buildCorsOptions() {
 
   return {
     origin: function (origin, cb) {
-      if (!origin) return cb(null, true); // Postman / Stripe (server-to-server)
+      if (!origin) return cb(null, true); // Postman / Stripe
       if (allowed.includes(origin)) return cb(null, true);
       return cb(new Error("CORS: origin non autorisée"), false);
     },
@@ -80,7 +80,6 @@ app.options("*", cors(corsOptions));
 
 /* =========================
    STRIPE WEBHOOK (RAW BODY)
-   ⚠️ MUST be BEFORE express.json()
 ========================= */
 
 app.post(
@@ -91,6 +90,24 @@ app.post(
 
 // JSON parser AFTER webhook
 app.use(express.json({ limit: "1mb" }));
+
+/* =========================
+   ROOT + HEALTH
+========================= */
+
+// ✅ évite le 404 sur "/"
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "DriveUs API",
+    health: "/health",
+    version: "3.0.0"
+  });
+});
+
+app.get("/health", (req, res) =>
+  res.json({ ok: true, status: "DriveUs V2 running 🚗" })
+);
 
 /* =========================
    ADMIN AUTO-BOOTSTRAP (Turso)
@@ -145,14 +162,6 @@ function startAutoCancelJob() {
     }
   }, 60 * 1000);
 }
-
-/* =========================
-   HEALTH CHECK
-========================= */
-
-app.get("/health", (req, res) =>
-  res.json({ ok: true, status: "DriveUs V2 running 🚗" })
-);
 
 /* =========================
    ROUTES
