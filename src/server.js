@@ -34,12 +34,14 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression());
 app.use(morgan("dev"));
 
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 300,
-  standardHeaders: true,
-  legacyHeaders: false
-}));
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 300,
+    standardHeaders: true,
+    legacyHeaders: false
+  })
+);
 
 /* =========================
    CORS PRODUCTION STRICT
@@ -58,15 +60,13 @@ function buildCorsOptions() {
 
   const allowed = raw
     .split(",")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 
   return {
     origin: function (origin, cb) {
-      if (!origin) return cb(null, true); // Postman / Stripe
-
+      if (!origin) return cb(null, true); // Postman / Stripe (server-to-server)
       if (allowed.includes(origin)) return cb(null, true);
-
       return cb(new Error("CORS: origin non autorisée"), false);
     },
     allowedHeaders: ["Content-Type", "Authorization"],
@@ -74,11 +74,13 @@ function buildCorsOptions() {
   };
 }
 
-app.use(cors(buildCorsOptions()));
-app.options("*", cors(buildCorsOptions()));
+const corsOptions = buildCorsOptions();
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 /* =========================
    STRIPE WEBHOOK (RAW BODY)
+   ⚠️ MUST be BEFORE express.json()
 ========================= */
 
 app.post(
@@ -91,51 +93,56 @@ app.post(
 app.use(express.json({ limit: "1mb" }));
 
 /* =========================
-   DATABASE MIGRATION
-========================= */
-
-migrate();
-
-/* =========================
-   ADMIN AUTO-BOOTSTRAP
+   ADMIN AUTO-BOOTSTRAP (Turso)
 ========================= */
 
 async function bootstrapAdmin() {
   if (!config.ADMIN_BOOTSTRAP_EMAIL || !config.ADMIN_BOOTSTRAP_PASSWORD) return;
 
   const email = String(config.ADMIN_BOOTSTRAP_EMAIL).toLowerCase();
-  const existing = db.prepare("SELECT id FROM users WHERE email=?").get(email);
+
+  const r = await db.execute("SELECT id FROM users WHERE email = ?", [email]);
+  const existing = r.rows?.[0] || null;
   if (existing) return;
 
   const id = uuidv4();
   const hash = await bcrypt.hash(config.ADMIN_BOOTSTRAP_PASSWORD, 10);
 
-  db.prepare(`
+  await db.execute(
+    `
     INSERT INTO users (id, email, password, role, created_at)
     VALUES (?, ?, ?, 'admin', ?)
-  `).run(id, email, hash, new Date().toISOString());
+    `,
+    [id, email, hash, new Date().toISOString()]
+  );
 
   console.log("✅ Admin bootstrap créé");
 }
 
 /* =========================
-   AUTO CANCEL JOB (30 min)
+   AUTO CANCEL JOB (30 min) (Turso)
 ========================= */
 
 function startAutoCancelJob() {
-  setInterval(() => {
-    const nowISO = new Date().toISOString();
+  setInterval(async () => {
+    try {
+      const nowISO = new Date().toISOString();
 
-    db.prepare(`
-      UPDATE bookings
-      SET status='cancelled',
-          payment_status='deposit_failed'
-      WHERE deposit_paid=0
-        AND status='pending_payment'
-        AND deposit_due_at IS NOT NULL
-        AND deposit_due_at < ?
-    `).run(nowISO);
-
+      await db.execute(
+        `
+        UPDATE bookings
+        SET status='cancelled',
+            payment_status='deposit_failed'
+        WHERE deposit_paid=0
+          AND status='pending_payment'
+          AND deposit_due_at IS NOT NULL
+          AND deposit_due_at < ?
+        `,
+        [nowISO]
+      );
+    } catch (e) {
+      console.error("Auto-cancel job error:", e.message);
+    }
   }, 60 * 1000);
 }
 
@@ -165,11 +172,20 @@ app.use(notFound);
 app.use(errorHandler);
 
 /* =========================
-   START SERVER
+   START (await migrate + admin)
 ========================= */
 
-bootstrapAdmin().then(startAutoCancelJob);
+(async () => {
+  try {
+    await migrate();
+    await bootstrapAdmin();
+    startAutoCancelJob();
 
-app.listen(config.PORT, () => {
-  console.log("🚀 Server running on port", config.PORT);
-});
+    app.listen(config.PORT, () => {
+      console.log("🚀 Server running on port", config.PORT);
+    });
+  } catch (e) {
+    console.error("❌ Startup failed:", e);
+    process.exit(1);
+  }
+})();
