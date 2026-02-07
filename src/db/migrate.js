@@ -1,7 +1,8 @@
 const db = require("./database");
 
-function migrate() {
-  db.prepare(`
+async function migrate() {
+  // USERS
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       email TEXT UNIQUE NOT NULL,
@@ -9,9 +10,10 @@ function migrate() {
       role TEXT NOT NULL DEFAULT 'user',
       created_at TEXT NOT NULL
     )
-  `).run();
+  `);
 
-  db.prepare(`
+  // BOOKINGS
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS bookings (
       id TEXT PRIMARY KEY,
       user_id TEXT,
@@ -35,6 +37,25 @@ function migrate() {
       invoice_number TEXT,
       invoiced_at TEXT
     )
-  `).run();
+  `);
+
+  // Index utiles (perf admin / webhook)
+  await db.execute(`
+    CREATE INDEX IF NOT EXISTS idx_bookings_created_at
+    ON bookings(created_at)
+  `);
+
+  await db.execute(`
+    CREATE INDEX IF NOT EXISTS idx_bookings_status
+    ON bookings(status)
+  `);
+
+  await db.execute(`
+    CREATE INDEX IF NOT EXISTS idx_bookings_deposit_due
+    ON bookings(deposit_due_at)
+  `);
+
+  console.log("✅ Database migration completed");
 }
+
 module.exports = { migrate };
